@@ -140,7 +140,7 @@ func DeleteDaemonSet(daemonSetName, namespace string) error {
 func doesDaemonSetExist(daemonSetName, namespace string) bool {
 	_, err := client.Client.DaemonSets(namespace).Get(context.TODO(), daemonSetName, metav1.GetOptions{})
 	if err != nil {
-		fmt.Println("Error ocurred for" + err.Error())
+		logrus.Infof("daemonset does not exist, err=%s", err.Error())
 	}
 	// If the error is not found, that means the daemon set exists
 	return err == nil

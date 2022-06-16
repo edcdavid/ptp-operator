@@ -58,8 +58,9 @@ func New(kubeconfig string) *ClientSet {
 		config, err = rest.InClusterConfig()
 	}
 	if err != nil {
-		glog.Infof("Failed to create a valid client")
-		return Client
+		glog.Infof("Failed to create a valid client, please set a valid KUBECONFIG environement variable.")
+		// Cannot create client, nothing else to do
+		os.Exit(1)
 	}
 
 	clientSet := &ClientSet{}

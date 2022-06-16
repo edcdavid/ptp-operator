@@ -6,6 +6,7 @@ import (
 	"os"
 
 	ptpv1 "github.com/openshift/ptp-operator/api/v1"
+	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -27,8 +28,8 @@ type NodeTopology struct {
 }
 
 // PtpEnabled returns the topology of a given node, filtering using the given selector.
-func PtpEnabled(client *client.ClientSet) ([]*NodeTopology, error) {
-	nodeDevicesList, err := client.NodePtpDevices(utils.PtpLinuxDaemonNamespace).List(context.Background(), metav1.ListOptions{})
+func PtpEnabled(aclient *client.ClientSet) ([]*NodeTopology, error) {
+	nodeDevicesList, err := aclient.NodePtpDevices(utils.PtpLinuxDaemonNamespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -40,6 +41,9 @@ func PtpEnabled(client *client.ClientSet) ([]*NodeTopology, error) {
 	nodeTopologyList := []*NodeTopology{}
 
 	nodesList, err := MatchingOptionalSelectorPTP(nodeDevicesList.Items)
+	if err != nil {
+		logrus.Errorf("error getting node list, err= %s", err)
+	}
 	for _, node := range nodesList {
 		if len(node.Status.Devices) > 0 {
 			interfaceList := []string{}

@@ -3,12 +3,27 @@ package clean
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/openshift/ptp-operator/test/utils"
 	"github.com/openshift/ptp-operator/test/utils/client"
+	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func DeleteLabel(label string) error {
+	nodeList, err := client.Client.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=", label)})
+	if err != nil {
+		return fmt.Errorf("failed to retrieve grandmaster node list %v", err)
+	}
+	for nodeIndex := range nodeList.Items {
+		delete(nodeList.Items[nodeIndex].Labels, label)
+		_, err = client.Client.CoreV1().Nodes().Update(context.Background(), &nodeList.Items[nodeIndex], metav1.UpdateOptions{})
+		if err != nil {
+			logrus.Errorf("Error updating node, err=%s", err)
+		}
+	}
+	return nil
+}
 
 // All removes any configuration applied by ptp tests.
 func All() error {
@@ -17,25 +32,21 @@ func All() error {
 		return err
 	}
 
-	nodeList, err := client.Client.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=", utils.PtpGrandmasterNodeLabel)})
+	err = DeleteLabel(utils.PtpGrandmasterNodeLabel)
 	if err != nil {
-		return fmt.Errorf("clean.All: Failed to retrieve grandmaster node list %v", err)
+		return fmt.Errorf("clean.All: fail to delete label: %s, err: %s", utils.PtpGrandmasterNodeLabel, err)
 	}
-	for _, node := range nodeList.Items {
-		delete(node.Labels, utils.PtpGrandmasterNodeLabel)
-		_, err = client.Client.CoreV1().Nodes().Update(context.Background(), &node, metav1.UpdateOptions{})
-	}
-
-	nodeList, err = client.Client.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=", utils.PtpSlaveNodeLabel)})
+	err = DeleteLabel(utils.PtpSlaveNodeLabel)
 	if err != nil {
-		return fmt.Errorf("clean.All: Failed to retrieve slave node list %v", err)
+		return fmt.Errorf("clean.All: fail to delete label: %s, err: %s", utils.PtpSlaveNodeLabel, err)
 	}
-	for _, node := range nodeList.Items {
-		delete(node.Labels, utils.PtpSlaveNodeLabel)
-		_, err = client.Client.CoreV1().Nodes().Update(context.Background(), &node, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("clean.All: Failed to remove label from %s %v", node.Name, err)
-		}
+	err = DeleteLabel(utils.PtpBCMasterNodeLabel)
+	if err != nil {
+		return fmt.Errorf("clean.All: fail to delete label: %s, err: %s", utils.PtpBCMasterNodeLabel, err)
+	}
+	err = DeleteLabel(utils.PtpBCSlaveNodeLabel)
+	if err != nil {
+		return fmt.Errorf("clean.All: fail to delete label: %s, err: %s", utils.PtpBCSlaveNodeLabel, err)
 	}
 	return nil
 }
@@ -47,22 +58,15 @@ func Configs() error {
 	}
 
 	for _, ptpConfig := range ptpconfigList.Items {
-		if ptpConfig.Name == utils.PtpGrandMasterPolicyName || ptpConfig.Name == utils.PtpSlavePolicyName {
+		if ptpConfig.Name == utils.PtpGrandMasterPolicyName ||
+			ptpConfig.Name == utils.PtpSlavePolicyName ||
+			ptpConfig.Name == utils.PtpBcMasterPolicyName ||
+			ptpConfig.Name == utils.PtpBcSlavePolicyName {
 			err = client.Client.PtpConfigs(utils.PtpLinuxDaemonNamespace).Delete(context.Background(), ptpConfig.Name, metav1.DeleteOptions{})
 			if err != nil {
 				return fmt.Errorf("clean.All: Failed to delete ptp config %s %v", ptpConfig.Name, err)
 			}
 		}
 	}
-	for i := 0; i < 20; i++ {
-		ptpconfigList, err = client.Client.PtpConfigs(utils.PtpLinuxDaemonNamespace).List(context.Background(), metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("clean.All: Failed to list ptp config  %v", err)
-		}
-		if len(ptpconfigList.Items) == 0 {
-			return nil
-		}
-		time.Sleep(5 * time.Second)
-	}
-	return fmt.Errorf("clean.All: Failed to list ptp config  %v", err)
+	return nil
 }
