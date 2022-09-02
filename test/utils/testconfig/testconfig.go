@@ -13,6 +13,7 @@ import (
 	"github.com/openshift/ptp-operator/test/utils/clean"
 	"github.com/openshift/ptp-operator/test/utils/client"
 	"github.com/openshift/ptp-operator/test/utils/l2discovery"
+	"github.com/test-network-function/l2discovery/l2lib"
 	"github.com/openshift/ptp-operator/test/utils/nodes"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -93,7 +94,7 @@ type TestConfig struct {
 	DiscoveredSlave2PtpConfig,
 	DiscoveredClockUnderTestPtpConfig,
 	DiscoveredClockUnderTestSecondaryPtpConfig *ptpDiscoveryRes
-	L2Config *l2discovery.L2DiscoveryConfig
+	L2Config *l2lib.L2DiscoveryConfig
 }
 type ptpDiscoveryRes ptpv1.PtpConfig
 
@@ -230,7 +231,7 @@ func CreatePtpConfigurations() {
 	GetDesiredConfig(true)
 	// in multi node configuration create ptp configs
 	if GlobalConfig.PtpModeDesired != Discovery {
-		GlobalConfig.L2Config, err = l2discovery.GetL2DiscoveryConfig()
+		GlobalConfig.L2Config, err = l2lib.GetL2DiscoveryConfig()
 		if err != nil {
 			logrus.Errorf("Error getting L2 discovery data, err=%s", err)
 		}
@@ -365,7 +366,7 @@ func CreatePtpConfigOC(profileName, nodeName, ifSlaveName string, phc2sys bool, 
 		pointer.Int64Ptr(int65))
 }
 
-func PtpConfigOC(config *l2discovery.L2DiscoveryConfig) {
+func PtpConfigOC(config *l2lib.L2DiscoveryConfig) {
 	var grandmaster, slave1 int
 
 	BestSolution := l2discovery.AlgoOC
