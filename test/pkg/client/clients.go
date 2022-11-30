@@ -39,6 +39,7 @@ type ClientSet struct {
 	Config    *rest.Config
 	OcpClient clientconfigv1.ConfigV1Interface
 	corev1client.CoreV1Interface
+	KubeConfigPath string
 }
 
 func Setup() {
@@ -68,6 +69,7 @@ func New(kubeconfig string) *ClientSet {
 	}
 
 	clientSet := &ClientSet{}
+	clientSet.KubeConfigPath = kubeconfig
 	clientSet.CoreV1Interface = corev1client.NewForConfigOrDie(config)
 	clientSet.Interface = kubernetes.NewForConfigOrDie(config)
 	clientSet.AppsV1Interface = appsv1client.NewForConfigOrDie(config)

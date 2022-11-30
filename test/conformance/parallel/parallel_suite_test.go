@@ -43,10 +43,12 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	logrus.Info("Executed from parallel suite")
 	testclient.Client = testclient.New("")
 	Expect(testclient.Client).NotTo(BeNil())
-
+	// temp
 	testconfig.CreatePtpConfigurations()
+	_ = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, false)
+	//
 	ptphelper.RestartPTPDaemon()
-	_ = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, true)
+
 	// _ = GetPtpTestConfig()
 	return []byte("ok")
 }, func(config []byte) {

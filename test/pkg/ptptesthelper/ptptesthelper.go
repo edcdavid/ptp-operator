@@ -2,9 +2,14 @@ package ptptesthelper
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"context"
@@ -20,10 +25,22 @@ import (
 	"github.com/openshift/ptp-operator/test/pkg/ptphelper"
 	"github.com/openshift/ptp-operator/test/pkg/testconfig"
 	"github.com/pkg/errors"
+
+	"github.com/redhat-cne/sdk-go/pkg/event"
+	ptpEvent "github.com/redhat-cne/sdk-go/pkg/event/ptp"
+	httpevents "github.com/redhat-cne/sdk-go/pkg/protocol/http"
+	"github.com/redhat-cne/sdk-go/pkg/pubsub"
+	"github.com/redhat-cne/sdk-go/pkg/subscriber"
+	"github.com/redhat-cne/sdk-go/pkg/types"
 	"github.com/sirupsen/logrus"
 	k8sPriviledgedDs "github.com/test-network-function/privileged-daemonset"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	//"github.com/redhat-cne/sdk-go/pkg/subscriber"
+	"github.com/google/uuid"
+	"log"
+	"net"
 )
 
 // helper function for old interface discovery test
@@ -321,4 +338,300 @@ func RebootSlaveNode(fullConfig testconfig.TestConfig) {
 	CheckSlaveSyncWithMaster(fullConfig)
 
 	logrus.Info("Rebooting system ends ..............")
+}
+
+func initSubscribers() map[string]string {
+	subscribeTo := make(map[string]string)
+	subscribeTo[string(ptpEvent.OsClockSyncStateChange)] = string(ptpEvent.OsClockSyncState)
+	//subscribeTo[string(ptpEvent.PtpClockClassChange)] = string(ptpEvent.PtpClockClass)
+	//subscribeTo[string(ptpEvent.PtpStateChange)] = string(ptpEvent.PtpLockState)
+	return subscribeTo
+}
+
+// Consumer webserver
+func server(localListeningEndpoint string) {
+
+	http.HandleFunc("/event", getEvent)
+	http.HandleFunc("/health", health)
+	http.HandleFunc("/ack/event", ackEvent)
+	err := http.ListenAndServe(localListeningEndpoint, nil)
+	logrus.Infof("ListenAndServe returns with err= %s", err)
+}
+
+func health(w http.ResponseWriter, req *http.Request) {
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// net/http.Header ["User-Agent": ["Go-http-client/1.1"],
+// "Ce-Subject": ["/cluster/node/master2/sync/ptp-status/ptp-clock-class-change"],
+// "Content-Type": ["application/json"],
+// "Accept-Encoding": ["gzip"],
+// "Content-Length": ["138"],
+// "Ce-Id": ["4eff05f8-493a-4382-8d89-209dc2179041"],
+// "Ce-Source": ["/cluster/node/master2/sync/ptp-status/ptp-clock-class-change"],
+// "Ce-Specversion": ["0.3"], "Ce-Time": ["2022-12-16T14:26:47.167232673Z"],
+// "Ce-Type": ["event.sync.ptp-status.ptp-clock-class-change"], ]
+
+func getEvent(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
+
+	aSource := req.Header.Get("Ce-Source")
+	aType := toEventType[req.Header.Get("Ce-Type")]
+	aTime, err := types.ParseTimestamp(req.Header.Get("Ce-Time"))
+	if err != nil {
+		logrus.Error(err)
+	}
+	logrus.Infof(aTime.String())
+	logrus.Infof(aSource)
+
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		logrus.Errorf("error reading event %v", err)
+	}
+	e := string(bodyBytes)
+
+	if e != "" {
+		logrus.Infof("received event %s", string(bodyBytes))
+		switch aType {
+		case LockState:
+			processEventLockState(aSource, aType, aTime.Time, bodyBytes)
+		}
+
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+type EventType int64
+
+const (
+	LockState EventType = iota
+)
+
+type LockStateValue int64
+
+const (
+	AcquiringSync LockStateValue = iota
+	AntennaDisconnected
+	AntennaShortCircuit
+	Booting
+	Freerun
+	Holdover
+	Locked
+	Synchronized
+	Unlocked
+)
+
+type StoredEvent struct {
+	TimeStamp time.Time
+	Source    string
+	Type      EventType
+	Value     int64
+}
+
+var (
+	mu               sync.Mutex
+	events           []StoredEvent
+	toEventType      = map[string]EventType{string(ptpEvent.OsClockSyncStateChange): LockState}
+	toLockStateValue = map[string]LockStateValue{
+		string(ptpEvent.ACQUIRING_SYNC):        AcquiringSync,
+		string(ptpEvent.ANTENNA_DISCONNECTED):  AntennaDisconnected,
+		string(ptpEvent.ANTENNA_SHORT_CIRCUIT): AntennaShortCircuit,
+		string(ptpEvent.BOOTING):               Booting,
+		string(ptpEvent.FREERUN):               Freerun,
+		string(ptpEvent.HOLDOVER):              Holdover,
+		string(ptpEvent.LOCKED):                Locked,
+		string(ptpEvent.SYNCHRONIZED):          Synchronized,
+		string(ptpEvent.UNLOCKED):              Unlocked,
+	}
+)
+
+func processEventLockState(source string, eventType EventType, eventTime time.Time, data []byte) {
+	var e event.Data
+	json.Unmarshal(data, &e)
+	logrus.Info(e)
+
+	// Note that there is no UnixMillis, so to get the
+	// milliseconds since epoch you'll need to manually
+	// divide from nanoseconds.
+	latency := (time.Now().UnixNano() - eventTime.UnixNano()) / 1000000
+	// set log to Info level for performance measurement
+	logrus.Infof("Latency for the event: %v ms\n", latency)
+
+	var value LockStateValue
+	for _, v := range e.Values {
+		if v.ValueType == event.ENUMERATION {
+			if str, ok := v.Value.(string); ok {
+				value = toLockStateValue[str]
+			} else {
+				logrus.Error("could not extract Lockstate value")
+			}
+		}
+	}
+	aEvent := StoredEvent{TimeStamp: eventTime, Source: source, Type: eventType, Value: int64(value)}
+	mu.Lock()
+	events = append(events, aEvent)
+	mu.Unlock()
+	logrus.Info(events)
+}
+
+func ackEvent(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		logrus.Errorf("error reading acknowledgment  %v", err)
+	}
+	e := string(bodyBytes)
+	if e != "" {
+		logrus.Infof("received ack %s", string(bodyBytes))
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+const (
+	resourcePrefix     string = "/cluster/node/%s%s"
+	localAPIAddr       string = "localhost:9085"
+	localListeningPort string = ":8989"
+)
+
+func RegisterAnWaitForEvents(nodeName, apiAddr string) {
+
+	subscribeTo := initSubscribers()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	localListeningEndpoint := GetOutboundIP(client.Client.Config.Host).String() + localListeningPort
+	go server(localListeningPort) // spin local api
+	time.Sleep(5 * time.Second)
+
+	var subs []pubsub.PubSub
+	for _, resource := range subscribeTo {
+		subs = append(subs, pubsub.PubSub{
+			ID:       uuid.New().String(),
+			Resource: fmt.Sprintf(resourcePrefix, nodeName, resource),
+		})
+	}
+
+	// if AMQ enabled the subscription will create an AMQ listener client
+	// IF HTTP enabled, the subscription will post a subscription  requested to all
+	// publishers that are defined in http-event-publisher variable
+
+	e := createSubscription(subs, apiAddr, localListeningEndpoint)
+	if e != nil {
+		logrus.Error(e)
+	}
+	logrus.Info("waiting for events")
+	wg.Wait()
+}
+
+func createSubscription(subscriptions []pubsub.PubSub, apiAddr, localAPIAddr string) (err error) {
+	//var status int
+	subURL := &types.URI{URL: url.URL{Scheme: "http",
+		Host: apiAddr,
+		Path: "subscription"}}
+	endpointURL := &types.URI{URL: url.URL{Scheme: "http",
+		Host: localAPIAddr,
+		Path: ""}}
+
+	subs := subscriber.New(uuid.UUID{})
+	//Self URL
+	_ = subs.SetEndPointURI(endpointURL.String())
+
+	// create a subscriber model
+	subs.AddSubscription(subscriptions...)
+
+	ce, _ := subs.CreateCloudEvents()
+	//ce.SetSource(endpointURL.String())
+	ce.SetSubject("1")
+	ce.SetSource(subscriptions[0].Resource)
+	ce.SetDataContentType("application/json")
+
+	//var subB []byte
+
+	logrus.Info(ce)
+
+	if err := httpevents.Post(fmt.Sprintf("%s", subURL.String()), *ce); err != nil {
+		logrus.Errorf("(1)error creating: %v at  %s with data %s=%s", err, subURL.String(), ce.String(), ce.Data())
+	}
+
+	/*if subB, err = json.Marshal(&ce); err == nil {
+		rc := restclient.New()
+		if status, subB = rc.PostWithReturn(subURL, subB); status != http.StatusCreated {
+			err = fmt.Errorf("error subscription creation api at %s, returned status %d", subURL, status)
+		}
+	}*/
+	return
+}
+
+/*func createSubscription2(resourceAddress, apiAddr, localAPIAddr string) (sub pubsub.PubSub, err error) {
+	var status int
+	subURL := &types.URI{URL: url.URL{Scheme: "http",
+		Host: apiAddr,
+		Path: fmt.Sprintf("%s%s", apiPath, "subscriptions")}}
+	endpointURL := &types.URI{URL: url.URL{Scheme: "http",
+		Host: localAPIAddr,
+		Path: "event"}}
+	aUUID:=uuid.New()
+	// Post it to the address that has been specified : to target URL
+	subs := subscriber.New(aUUID)
+	//Self URL
+	_ = subs.SetEndPointURI(localAPIAddr)
+	obj := pubsub.PubSub{
+		ID:       endpointURL,
+		Resource: resourceAddress,
+	}
+	// create a subscriber model
+	subs.AddSubscription(obj)
+	subs.Action = d.Status
+	ce, _ := subs.CreateCloudEvents()
+	ce.SetSubject(d.Status.String())
+	ce.SetSource(d.Address)
+
+
+	var subB []byte
+
+	if subB, err = json.Marshal(&sub); err == nil {
+		rc := restclient.New()
+		if status, subB = rc.PostWithReturn(subURL, subB); status != http.StatusCreated {
+			err = fmt.Errorf("error subscription creation api at %s, returned status %d", subURL, status)
+		} else {
+			err = json.Unmarshal(subB, &sub)
+		}
+	} else {
+		err = fmt.Errorf("failed to marshal subscription or %s", resourceAddress)
+	}
+	return
+
+
+
+	if len(h.Publishers) > 0 {
+		for _, pubURL := range h.Publishers { // if you call
+			if err := Post(fmt.Sprintf("%s/subscription", subURL.String()), *ce); err != nil {
+				log.Errorf("(1)error creating: %v at  %s with data %s=%s", err, pubURL.String(), ce.String(), ce.Data())
+				localmetrics.UpdateSenderCreatedCount(d.Address, localmetrics.ACTIVE, -1)
+				d.Status = channel.FAILED
+				h.DataOut <- d
+			}
+		}
+	}
+
+}
+*/
+
+// Get preferred outbound ip of this machine
+func GetOutboundIP(aUrl string) net.IP {
+	u, err := url.Parse(aUrl)
+	if err != nil {
+		log.Fatalf("cannot parse k8s api url, would not receive events, stopping, err = %s", err)
+	}
+
+	conn, err := net.Dial("udp", u.Host)
+	if err != nil {
+		log.Fatalf("error dialing host or address (%s), err = %s", u.Host, err)
+	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	logrus.Infof("Outbound IP = %s to reach server: %s", localAddr.IP.String(), client.Client.Config.Host)
+	return localAddr.IP
 }
